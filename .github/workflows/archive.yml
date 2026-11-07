@@ -1,0 +1,71 @@
+# 過去号: keep each issue of 恐怖新聞 (limelightle-debug/fear-index) with the data it was read with, and as a picture.
+# Polls every 15 minutes: an issue whose time is already kept is left alone. The repository always holds a single
+# commit (force-pushed), so it stays at half a year of issues and never grows with history.
+name: archive
+on:
+  schedule: [{cron: "*/15 * * * *"}]
+  workflow_dispatch:
+    inputs:
+      ids: {description: "take these kept issues' pictures again (space separated, e.g. 2026-11-04-mor); empty: keep the current issue", required: false, default: ""}
+concurrency: archive
+permissions:
+  contents: write
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: anything new?
+        if: inputs.ids == ''
+        id: chk
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/limelightle-debug/fear-index/main/data/paper.json" -o paper.json
+          curl -fsSL "https://raw.githubusercontent.com/limelightle-debug/fear-archive/main/index.json?$(date +%s)" -o index.json || echo '{"issues":[]}' > index.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, datetime
+          p = json.load(open("paper.json")); idx = json.load(open("index.json"))
+          T = lambda v: datetime.datetime.fromisoformat(v)
+          w = p.get("revisedAt") or p.get("writtenAt")
+          c = [(T(v), v) for v in (w, p.get("preAt"), p.get("sunAt")) if v]
+          at = max(c)[1] if c else None
+          print("new=" + ("false" if not at or any(r["at"] == at for r in idx["issues"]) else "true"))
+          PY
+      - if: inputs.ids != '' || steps.chk.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with: {path: fear-archive}
+      - if: inputs.ids != '' || steps.chk.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with: {repository: limelightle-debug/fear-index, path: fear-index}
+      - if: inputs.ids != '' || steps.chk.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with: {repository: limelightle-debug/mri-app, path: mri-app, sparse-checkout: data}
+      - if: inputs.ids != '' || steps.chk.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with: {repository: limelightle-debug/ndx-heatmap, path: ndx-heatmap, sparse-checkout: data}
+      - if: inputs.ids != '' || steps.chk.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with: {repository: limelightle-debug/tqqq, path: tqqq, sparse-checkout: data}
+      - name: keep the issue
+        if: inputs.ids == '' && steps.chk.outputs.new == 'true'
+        id: keep
+        run: |
+          set +e; python3 fear-archive/scripts/archive.py .; s=$?; set -e
+          [ $s -eq 0 ] && echo "go=true" >> "$GITHUB_OUTPUT"; [ $s -eq 0 ] || [ $s -eq 3 ]
+      - uses: actions/setup-python@v5
+        if: inputs.ids != '' || steps.keep.outputs.go == 'true'
+        with: {python-version: "3.12"}
+      - name: picture
+        if: inputs.ids != '' || steps.keep.outputs.go == 'true'
+        run: |
+          pip install -q playwright pillow
+          python -m playwright install --with-deps chromium >/dev/null
+          python fear-archive/scripts/snapshot.py . ${{ inputs.ids }}
+      - name: commit (one commit, force-pushed)
+        if: inputs.ids != '' || steps.keep.outputs.go == 'true'
+        working-directory: fear-archive
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan snap
+          git add -A
+          git commit -q -m "過去号: $(python3 -c 'import json;print(json.load(open("index.json"))["issues"][0]["id"])')"
+          git push -q -f origin snap:main
